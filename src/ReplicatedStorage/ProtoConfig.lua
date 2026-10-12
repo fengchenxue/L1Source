@@ -90,14 +90,19 @@ Config.StompSnap = true -- 踩中的瞬间把踩人的一方对齐到对方头�
 -- 踩头辅助（模式 5，屏幕上的按钮可以切换）："Early" 前段辅助接近，"Late" 末段吸附，"Off" 不辅助
 Config.AssistMode = "Early"
 
--- 前段辅助接近：起跳时按移动方向选一个近处的目标，上升阶段把落点往他头顶修正；
--- 过了最高点就停，下落阶段留给对方躲闪。站着不动起跳不辅助
+-- 前段辅助接近：起跳时按移动方向选一个近处的目标，之后修正水平速度，让你朝他头顶落下；
+-- 离踩到还剩 AssistCutoffTime 秒就停，这段时间留给对方躲闪。站着不动起跳不辅助
 Config.AssistRange = 10 -- 起跳时多远内的人可以被选为目标
 Config.AssistConeDot = 0.5 -- 目标要在移动方向前方多大角度内，0.5 约等于左右各 60 度
 Config.AssistCancelDot = 0 -- 空中往别处按（和目标方向夹角超过 90 度）就取消辅助，把方向还给玩家
 Config.AssistMaxHeight = 6 -- 目标头顶最多比自己脚高多少格，跳不上去的不选
-Config.AssistSpeedVsPlayer = 8 -- 上升阶段修正落点的速度（格/秒），对真人
-Config.AssistSpeedVsNPC = 12 -- 对 NPC
+Config.AssistCutoffTime = 0.2 -- 离踩到还剩几秒时停止辅助；短按长按都一样，越大对方越容易躲
+Config.AssistMaxSpeed = 22 -- 辅助期间的水平速度上限（格/秒），走路是 16
+Config.AssistAccelVsPlayer = 50 -- 辅助改变水平速度有多快（格/秒²），对真人
+Config.AssistAccelVsNPC = 80 -- 对 NPC
+Config.AssistBrakeAccel = 250 -- 辅助需要减速时（比如目标就在跟前）用的减速度，免得贴着别人起跳时撞上他的身体
+Config.AssistHoldAfterCutoff = true -- 辅助停下后保持当时的水平速度，不再追对方；免得一直按着前进键被空中操控推过头
+Config.AssistHoldDot = 0.8 -- 保持期间方向键偏离起跳时的方向超过约 37 度，就把操控还给玩家（键盘斜按是 45 度）
 
 -- 末段吸附：目标和前段辅助用同一套规则（起跳或反弹时按移动方向选），
 -- 只在下落、离对方头部够近时把自己往他头顶挪一点。按被踩的人区分

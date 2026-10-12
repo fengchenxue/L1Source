@@ -52,6 +52,9 @@ local assistMode = Config.AssistMode -- 模式 5 的踩头辅助："Early"、"La
 local assistTarget = nil -- 前段辅助接近：这一跳选中的目标
 local assistStart = 0
 local beginAssist -- 起跳时选目标，函数在后面定义
+local assistIntent = nil -- 起跳时的移动方向，用来判断玩家后来有没有改主意
+local assistVel = nil -- 辅助期间由脚本掌握的水平速度；Roblox 的空中操控会把速度往按键方向推，所以不能每帧重新读
+local assistHold = nil -- 辅助停下后要保持的水平速度
 local lastStompAt = -math.huge
 
 local rayParams = RaycastParams.new()
@@ -201,6 +204,7 @@ assistToggle.Activated:Connect(function()
 	local i = table.find(ASSIST_ORDER, assistMode) or 0
 	assistMode = ASSIST_ORDER[i % #ASSIST_ORDER + 1]
 	assistTarget = nil
+	assistHold = nil
 	refreshAssistToggle()
 end)
 
@@ -486,6 +490,7 @@ end
 local function onLocalHit(target, kind)
 	recentlyHit[target] = os.clock()
 	assistTarget = nil -- 踩中或踢中就解除当前辅助目标，反弹时再重新选
+	assistHold = nil
 	local power = kind == "stomp" and Config.StompPower or kickPower
 	HitRemote:FireServer(target, kind, power, kickDir)
 	shake(Config.ShakeIntensity * (0.6 + power * 0.6), 0.25)
@@ -552,7 +557,8 @@ local function checkStomp()
 	local feetY = root.Position.Y - feetOffset()
 	local prevFeetY = lastFeetY or feetY
 	lastFeetY = feetY
-	if root.AssemblyLinearVelocity.Y > 2 then
+	-- 往上跳的时候不算；但已经被别人的头托住（站在头上）时，就算还在微微上升也算
+	if root.AssemblyLinearVelocity.Y > 2 and not grounded() then
 		return
 	end
 	local low, high = math.min(feetY, prevFeetY), math.max(feetY, prevFeetY)
@@ -578,6 +584,8 @@ end
 -- 起跳或反弹时按移动方向选一个近处的目标，前段辅助和末段吸附共用；站着不动起跳、往外跑都不选
 beginAssist = function()
 	assistTarget = nil
+	assistVel = nil
+	assistHold = nil
 	if mode ~= 5 or assistMode == "Off" then
 		return
 	end
@@ -607,9 +615,11 @@ beginAssist = function()
 	end
 	assistTarget = best
 	assistStart = os.clock()
+	assistIntent = move
 end
 
--- 空中往目标以外的方向按，辅助立刻让位；不按方向键不算改主意
+-- 空中改主意时辅助立刻让位：按键方向既偏离起跳时的方向、又背离目标才算。
+-- 越过对方后还按着前进不算改主意；不按方向键也不算
 local function assistCancelledByInput(center)
 	local move = humanoid.MoveDirection
 	if move.Magnitude < 0.1 then
@@ -619,42 +629,135 @@ local function assistCancelledByInput(center)
 	if to.Magnitude < 1.5 then
 		return false
 	end
-	return Vector3.new(move.X, 0, move.Z).Unit:Dot(to.Unit) < Config.AssistCancelDot
+	local m = Vector3.new(move.X, 0, move.Z).Unit
+	local turned = if assistIntent then m:Dot(assistIntent) < 0 else true
+	return turned and m:Dot(to.Unit) < Config.AssistCancelDot
 end
 
--- 前段辅助：上升阶段把预估落点往目标头顶修正；过了最高点、目标失效、超时或玩家往别处按就停
+-- 上升到最高点要多久、能再升多高。phases 是按顺序的 {重力倍数, 持续秒数}，之后按 kLast
+local function riseToApex(vy, phases, kLast)
+	local g = workspace.Gravity
+	local t, h = 0, 0
+	for _, phase in phases do
+		local k, duration = phase[1], phase[2]
+		if duration > 0 then
+			local tStop = vy / (g * k)
+			if tStop <= duration then
+				return t + tStop, h + vy * tStop - 0.5 * g * k * tStop * tStop
+			end
+			h += vy * duration - 0.5 * g * k * duration * duration
+			vy -= g * k * duration
+			t += duration
+		end
+	end
+	local tStop = vy / (g * kLast)
+	return t + tStop, h + vy * vy / (2 * g * kLast)
+end
+
+-- 预估还要多久，脚会在下落途中到达 top 这个高度。按当前跳法的重力算：按住加高和马里奥式
+-- 按住时上升重力变小，下落重力变大
+local function timeToHeadHeight(top)
+	local g = workspace.Gravity
+	local vy = root.AssemblyLinearVelocity.Y
+	local feetY = root.Position.Y - feetOffset()
+	local style = Config.JumpStyles[jumpStyle]
+	local fallK = if style then style.Fall else 1
+	local tUp, apexFeet = 0, feetY
+	if vy > 0 then
+		local phases, kLast = {}, 1
+		if style then
+			kLast = style.RiseReleased
+			local sinceJump = os.clock() - customJumpStart
+			local holding = sinceJump <= style.HoldEnd
+				and (customHold == "always" or (customHold == "detect" and jumpHeld()))
+			if holding then
+				phases = {
+					{ style.RiseReleased, math.max(style.HoldStart - sinceJump, 0) },
+					{ style.RiseHeld, math.max(style.HoldEnd - math.max(sinceJump, style.HoldStart), 0) },
+				}
+			end
+		end
+		local gain
+		tUp, gain = riseToApex(vy, phases, kLast)
+		apexFeet = feetY + gain
+		vy = 0
+	end
+	local drop = apexFeet - top
+	if drop <= 0 then
+		return tUp
+	end
+	local a = g * fallK
+	return tUp + (vy + math.sqrt(vy * vy + 2 * a * drop)) / a
+end
+
+-- 前段辅助：修正水平速度，让你刚好在落到对方头顶时到达他上方；
+-- 离踩到还剩 AssistCutoffTime 秒、目标失效、超时或玩家改主意就停
 local function applyEarlyAssist(dt)
 	if assistMode ~= "Early" or not assistTarget then
 		return
 	end
 	local v = root.AssemblyLinearVelocity
-	if v.Y <= 0 or not validTarget(assistTarget) or os.clock() - assistStart > 0.6 then
+	-- 起跳那一帧速度可能还没加上，先等一下
+	if v.Y < 1 and os.clock() - assistStart < 0.1 then
+		return
+	end
+	if not validTarget(assistTarget) or os.clock() - assistStart > 1.2 then
 		assistTarget = nil
+		assistVel = nil
 		return
 	end
 	local head = assistTarget:FindFirstChild("Head")
 	local center = if head then head.Position else targetRoot(assistTarget).Position
 	if assistCancelledByInput(center) then
 		assistTarget = nil
+		assistVel = nil
 		return
 	end
-	-- 预估落到对方头顶高度的时间：先升到最高点，再按下落重力落下
-	local g = workspace.Gravity
-	local style = Config.JumpStyles[jumpStyle]
-	local fall = if style then style.Fall else 1
-	local feetY = root.Position.Y - feetOffset()
-	local apexFeet = feetY + v.Y * v.Y / (2 * g)
-	local drop = math.max(apexFeet - headTop(assistTarget), 0)
-	local t = v.Y / g + math.sqrt(2 * drop / (g * fall))
-	local landing = Vector3.new(root.Position.X + v.X * t, 0, root.Position.Z + v.Z * t)
-	local err = Vector3.new(center.X, 0, center.Z) - landing
-	if err.Magnitude < 0.05 then
+	local t = timeToHeadHeight(headTop(assistTarget))
+	if t <= Config.AssistCutoffTime then
+		-- 辅助结束，之后对方怎么躲都不再跟。保持现在的水平速度，免得一直按着前进键被空中操控推过头
+		assistTarget = nil
+		assistHold = if Config.AssistHoldAfterCutoff then assistVel else nil
+		assistVel = nil
 		return
 	end
-	local speed = if Players:GetPlayerFromCharacter(assistTarget)
-		then Config.AssistSpeedVsPlayer
-		else Config.AssistSpeedVsNPC
-	root.CFrame += err.Unit * math.min(err.Magnitude, speed * dt)
+	-- 刚好 t 秒后到达对方头顶上方所需的水平速度，不超过上限
+	local want = Vector3.new(center.X - root.Position.X, 0, center.Z - root.Position.Z) / t
+	if want.Magnitude > Config.AssistMaxSpeed then
+		want = want.Unit * Config.AssistMaxSpeed
+	end
+	if not assistVel then
+		assistVel = Vector3.new(v.X, 0, v.Z)
+	end
+	local accel = if Players:GetPlayerFromCharacter(assistTarget)
+		then Config.AssistAccelVsPlayer
+		else Config.AssistAccelVsNPC
+	if want.Magnitude < assistVel.Magnitude then
+		accel = math.max(accel, Config.AssistBrakeAccel)
+	end
+	local diff = want - assistVel
+	if diff.Magnitude > 1e-3 then
+		assistVel += diff.Unit * math.min(diff.Magnitude, accel * dt)
+	end
+	root.AssemblyLinearVelocity = Vector3.new(assistVel.X, v.Y, assistVel.Z)
+end
+
+-- 辅助停下后保持速度，沿原路落下；方向键明显换了方向，就把操控还给玩家。不按方向键不算换方向
+local function applyAssistHold()
+	if not assistHold then
+		return
+	end
+	local move = humanoid.MoveDirection
+	if
+		move.Magnitude >= 0.1
+		and assistIntent
+		and Vector3.new(move.X, 0, move.Z).Unit:Dot(assistIntent) < Config.AssistHoldDot
+	then
+		assistHold = nil
+		return
+	end
+	local v = root.AssemblyLinearVelocity
+	root.AssemblyLinearVelocity = Vector3.new(assistHold.X, v.Y, assistHold.Z)
 end
 
 -- 末段吸附：用起跳或反弹时选好的同一个目标，只在下落、离对方头部够近时把自己往他头顶挪一点
@@ -855,6 +958,7 @@ local function setMode(id)
 	lastFeetY = nil
 	chainCount = 0
 	assistTarget = nil
+	assistHold = nil
 	refreshStyleToggle()
 	refreshAssistToggle()
 	for mid, b in modeButtons do
@@ -1103,6 +1207,7 @@ RunService.PreSimulation:Connect(function(dt)
 		root.AssemblyLinearVelocity = Vector3.new(flightVel.X, cur.Y, flightVel.Z)
 		if mode == 5 then
 			applyEarlyAssist(dt)
+			applyAssistHold()
 			applyStompMagnet(dt)
 			checkStomp()
 		end
@@ -1131,6 +1236,10 @@ RunService.PreSimulation:Connect(function(dt)
 		end
 	elseif state == "idle" or state == "charging" then
 		if mode == 5 then
+			-- 先判踩头：站到别人头上时，踩中优先于按住跳跃键的自动连跳
+			checkStomp()
+		end
+		if mode == 5 and state ~= "hitstop" then
 			-- 按住跳更高：按住加高和马里奥式靠重力；截断式在上升途中松开跳跃键（或动作键）就把上升速度截短
 			if jumpStyle ~= "Cut" then
 				customJumpStep(dt)
@@ -1147,6 +1256,7 @@ RunService.PreSimulation:Connect(function(dt)
 				end
 			end
 			applyEarlyAssist(dt)
+			applyAssistHold()
 			applyStompMagnet(dt)
 			checkStomp()
 			-- 落地就清零连踩；刚踩中时脚还贴着对方头顶，留一点时间
@@ -1156,6 +1266,7 @@ RunService.PreSimulation:Connect(function(dt)
 			-- 落地就解除辅助目标（末段吸附的目标会保留到落地）
 			if state == "idle" and grounded() and os.clock() - assistStart > 0.2 then
 				assistTarget = nil
+				assistHold = nil
 			end
 		end
 		if state ~= "hitstop" then
