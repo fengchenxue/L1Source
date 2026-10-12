@@ -1372,7 +1372,7 @@ RunService.RenderStepped:Connect(function()
 	elseif mode == 4 then
 		shown = findTarget(Config.LockRange, Config.LockConeDot)
 	elseif mode == 5 then
-		-- 前段辅助正在追的目标标红；过了最高点辅助停止，标记也消失
+		-- 前段辅助正在追的目标标红；离踩到还剩 AssistCutoffTime 秒时停止追踪，标记也消失
 		shown = assistTarget
 	end
 	highlight.Adornee = shown
