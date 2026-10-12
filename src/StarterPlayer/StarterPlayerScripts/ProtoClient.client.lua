@@ -805,6 +805,10 @@ local function checkBouncePad()
 		end
 		local v = root.AssemblyLinearVelocity
 		airKickUsed = false
+		-- 跳垫起飞不带辅助：清掉上一跳留下的辅助目标和保持速度，免得整段跳垫飞行里方向键不起作用
+		assistTarget = nil
+		assistVel = nil
+		assistHold = nil
 		beginFlight(Vector3.new(v.X, Config.BouncePadSpeed, v.Z), true)
 		playSound(Config.Sounds.Bounce, root, 0.8, 1.4)
 	end
