@@ -16,12 +16,13 @@ local PoseRemote = remotes:WaitForChild("Pose")
 local FXRemote = remotes:WaitForChild("FX")
 local KickedRemote = remotes:WaitForChild("Kicked")
 local ScoredRemote = remotes:WaitForChild("Scored")
-local NPCToggleRemote = remotes:WaitForChild("NPCToggle")
+local TestSettingRemote = remotes:WaitForChild("TestSetting")
 
 local player = Players.LocalPlayer
 local camera = workspace.CurrentCamera
 
-local mode = Config.DefaultMode
+-- 模式、跳法、辅助都跟着服务器上这一轮的设置走（多人测试时主持人统一切换）
+local mode = workspace:GetAttribute("TestMode") or Config.DefaultMode
 local state = "idle" -- idle / charging / flying / kicking / hitstop / down
 local character, humanoid, root, alignOri
 local chargeStart = 0
@@ -40,7 +41,7 @@ local localPose = ""
 local actionHeld = false -- 动作键是否按着（模式 5 里动作键也能跳）
 local jumpRising = false -- 模式 5：起跳后还在上升，松手就截短
 local jumpStart = 0
-local jumpStyle = Config.JumpStyle -- 模式 5 的跳法："Boost"、"Mario" 或 "Cut"
+local jumpStyle = workspace:GetAttribute("TestJumpStyle") or Config.JumpStyle -- 模式 5 的跳法："Boost"、"Mario3D"、"Mario" 或 "Cut"
 local customJumpStart = -math.huge -- 按住加高和马里奥式：这一跳从什么时候开始
 local customHold = "detect" -- 这一跳怎么算按住："detect" 看按键，"always" 一直算按住，"never" 不加高
 local customOwnJump = false -- 这一跳是不是脚本自己发起的
@@ -48,7 +49,7 @@ local jumpQueuedAt = nil -- 起跳缓冲：最近一次按跳的时间
 local lastGroundedAt = -math.huge -- 土狼时间：最近一次站在地上的时间
 local lastFeetY = nil -- 上一帧脚的高度，踩头判定用来检查这一帧脚扫过了哪段高度
 local chainCount = 0 -- 连踩：这次腾空里已经踩中几个
-local assistMode = Config.AssistMode -- 模式 5 的踩头辅助："Early"、"Late" 或 "Off"
+local assistMode = workspace:GetAttribute("TestAssist") or Config.AssistMode -- 模式 5 的踩头辅助："Early"、"Late" 或 "Off"
 local assistTarget = nil -- 前段辅助接近：这一跳选中的目标
 local assistStart = 0
 local beginAssist -- 起跳时选目标，函数在后面定义
@@ -136,7 +137,15 @@ scoreLabel.TextScaled = true
 scoreLabel.Text = "踢飞 0"
 scoreLabel.Parent = gui
 
+-- 多人测试的主持人才能改设置（服务器判定后写在自己身上）；其他人的按钮都藏起来，只看这一轮的设置
+local function isHost()
+	return player:GetAttribute("TestHost") == true
+end
+
+local NPC_MODE_ORDER = { "attack", "wander", "off" }
+local NPC_MODE_NAMES = { attack = "NPC：进攻", wander = "NPC：闲逛", off = "NPC：不出现" }
 local npcToggle = Instance.new("TextButton")
+npcToggle.Name = "NPCToggle"
 npcToggle.Size = UDim2.new(0, 150, 0, 32)
 npcToggle.Position = UDim2.new(1, -170, 0, 126)
 npcToggle.Font = Enum.Font.GothamBold
@@ -145,14 +154,16 @@ npcToggle.TextColor3 = Color3.new(1, 1, 1)
 npcToggle.Parent = gui
 corner(npcToggle, 8)
 local function refreshNPCToggle()
-	local on = workspace:GetAttribute("NPCAttack")
-	npcToggle.Text = if on then "NPC 进攻：开" else "NPC 进攻：关"
-	npcToggle.BackgroundColor3 = if on then Color3.fromRGB(220, 60, 60) else Color3.fromRGB(40, 40, 40)
+	local npcMode = workspace:GetAttribute("NPCMode")
+	npcToggle.Text = NPC_MODE_NAMES[npcMode] or tostring(npcMode)
+	npcToggle.BackgroundColor3 = if npcMode == "attack" then Color3.fromRGB(220, 60, 60) else Color3.fromRGB(40, 40, 40)
+	npcToggle.Visible = isHost()
 end
-workspace:GetAttributeChangedSignal("NPCAttack"):Connect(refreshNPCToggle)
+workspace:GetAttributeChangedSignal("NPCMode"):Connect(refreshNPCToggle)
 refreshNPCToggle()
 npcToggle.Activated:Connect(function()
-	NPCToggleRemote:FireServer()
+	local i = table.find(NPC_MODE_ORDER, workspace:GetAttribute("NPCMode")) or 0
+	TestSettingRemote:FireServer("NPCMode", NPC_MODE_ORDER[i % #NPC_MODE_ORDER + 1])
 end)
 
 local function currentJumpPower()
@@ -165,7 +176,13 @@ local function currentJumpPower()
 	return Config.JumpStyles[jumpStyle].Power
 end
 
-local STYLE_ORDER = { "Boost", "Mario", "Cut" }
+-- 踩中后弹起的速度：跳法自己写了就用跳法的，免得重力不同的跳法弹的高度不一样
+local function stompBounceSpeed()
+	local style = Config.JumpStyles[jumpStyle]
+	return if style and style.Bounce then style.Bounce else Config.StompBounce
+end
+
+local STYLE_ORDER = { "Boost", "Mario3D", "Mario", "Cut" }
 local function styleName(style)
 	return if style == "Cut" then "松手截断" else Config.JumpStyles[style].Name
 end
@@ -182,7 +199,7 @@ styleToggle.Parent = gui
 corner(styleToggle, 8)
 local function refreshStyleToggle()
 	styleToggle.Text = "跳法：" .. styleName(jumpStyle)
-	styleToggle.Visible = mode == 5
+	styleToggle.Visible = mode == 5 and isHost()
 end
 local ASSIST_ORDER = { "Early", "Late", "Off" }
 local ASSIST_NAMES = { Early = "前段辅助", Late = "末段吸附", Off = "不辅助" }
@@ -198,25 +215,88 @@ assistToggle.Parent = gui
 corner(assistToggle, 8)
 local function refreshAssistToggle()
 	assistToggle.Text = "辅助：" .. ASSIST_NAMES[assistMode]
-	assistToggle.Visible = mode == 5
+	assistToggle.Visible = mode == 5 and isHost()
 end
+
+-- 这一轮的设置，所有人都能看到
+local testInfo = Instance.new("TextLabel")
+testInfo.Size = UDim2.new(0, 520, 0, 20)
+testInfo.Position = UDim2.new(0.5, -260, 0, 74)
+testInfo.BackgroundColor3 = Color3.new(0, 0, 0)
+testInfo.BackgroundTransparency = 0.5
+testInfo.TextColor3 = Color3.fromRGB(255, 230, 120)
+testInfo.Font = Enum.Font.GothamMedium
+testInfo.TextScaled = true
+testInfo.Parent = gui
+corner(testInfo, 6)
+local function refreshTestInfo()
+	local parts = { "第 " .. tostring(workspace:GetAttribute("TestRound") or 1) .. " 轮", Config.Modes[mode].name }
+	if mode == 5 then
+		table.insert(parts, styleName(jumpStyle))
+		table.insert(parts, ASSIST_NAMES[assistMode])
+	end
+	table.insert(parts, NPC_MODE_NAMES[workspace:GetAttribute("NPCMode")] or "")
+	testInfo.Text = table.concat(parts, "｜")
+end
+
+local roundButton = Instance.new("TextButton")
+roundButton.Name = "NewRoundButton"
+roundButton.Size = UDim2.new(0, 150, 0, 32)
+roundButton.Position = UDim2.new(1, -170, 0, 240)
+roundButton.Font = Enum.Font.GothamBold
+roundButton.TextScaled = true
+roundButton.TextColor3 = Color3.new(1, 1, 1)
+roundButton.BackgroundColor3 = Color3.fromRGB(150, 80, 200)
+roundButton.Text = "新一轮（计分清零）"
+roundButton.Parent = gui
+corner(roundButton, 8)
+roundButton.Activated:Connect(function()
+	TestSettingRemote:FireServer("NewRound")
+end)
+
+-- 上一轮结果：开新一轮时给所有人看一会儿
+local summaryLabel = Instance.new("TextLabel")
+summaryLabel.Size = UDim2.new(0, 360, 0, 200)
+summaryLabel.Position = UDim2.new(0, 16, 0.5, -100)
+summaryLabel.BackgroundColor3 = Color3.new(0, 0, 0)
+summaryLabel.BackgroundTransparency = 0.35
+summaryLabel.TextColor3 = Color3.new(1, 1, 1)
+summaryLabel.Font = Enum.Font.GothamMedium
+summaryLabel.TextSize = 16
+summaryLabel.TextWrapped = true
+summaryLabel.TextXAlignment = Enum.TextXAlignment.Left
+summaryLabel.TextYAlignment = Enum.TextYAlignment.Top
+summaryLabel.AutomaticSize = Enum.AutomaticSize.Y
+summaryLabel.Visible = false
+summaryLabel.Parent = gui
+corner(summaryLabel, 8)
+local summaryPadding = Instance.new("UIPadding")
+summaryPadding.PaddingLeft = UDim.new(0, 10)
+summaryPadding.PaddingRight = UDim.new(0, 10)
+summaryPadding.PaddingTop = UDim.new(0, 8)
+summaryPadding.PaddingBottom = UDim.new(0, 8)
+summaryPadding.Parent = summaryLabel
+local summaryToken = 0
+workspace:GetAttributeChangedSignal("LastRoundSummary"):Connect(function()
+	summaryToken += 1
+	local token = summaryToken
+	summaryLabel.Text = workspace:GetAttribute("LastRoundSummary") or ""
+	summaryLabel.Visible = true
+	task.delay(12, function()
+		if token == summaryToken then
+			summaryLabel.Visible = false
+		end
+	end)
+end)
+
 assistToggle.Activated:Connect(function()
 	local i = table.find(ASSIST_ORDER, assistMode) or 0
-	assistMode = ASSIST_ORDER[i % #ASSIST_ORDER + 1]
-	assistTarget = nil
-	assistHold = nil
-	refreshAssistToggle()
+	TestSettingRemote:FireServer("Assist", ASSIST_ORDER[i % #ASSIST_ORDER + 1])
 end)
 
 styleToggle.Activated:Connect(function()
 	local i = table.find(STYLE_ORDER, jumpStyle) or 0
-	jumpStyle = STYLE_ORDER[i % #STYLE_ORDER + 1]
-	jumpRising = false
-	jumpQueuedAt = nil
-	if humanoid then
-		humanoid.JumpPower = currentJumpPower()
-	end
-	refreshStyleToggle()
+	TestSettingRemote:FireServer("JumpStyle", STYLE_ORDER[i % #STYLE_ORDER + 1])
 end)
 
 local chargeBar = Instance.new("Frame")
@@ -521,7 +601,7 @@ local function onLocalHit(target, kind)
 		-- 踩中后弹起来：固定高度，不受按键影响
 		hitstopThen(function()
 			state = "idle"
-			root.AssemblyLinearVelocity = Vector3.new(before.X, Config.StompBounce, before.Z)
+			root.AssemblyLinearVelocity = Vector3.new(before.X, stompBounceSpeed(), before.Z)
 			jumpRising = false
 			customJumpStart = os.clock()
 			customHold = "never"
@@ -814,7 +894,7 @@ local function checkBouncePad()
 	end
 end
 
--- 按住加高和马里奥式：起跳缓冲、土狼时间、按住自动连跳，以及按住、没按住、下落三套重力
+-- 按住加高、3D马里奥式和马里奥式：起跳缓冲、土狼时间、按住自动连跳，以及按住、没按住、下落三套重力
 local function customJumpStep(dt)
 	local style = Config.JumpStyles[jumpStyle]
 	local now = os.clock()
@@ -837,12 +917,15 @@ local function customJumpStep(dt)
 		humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
 		return
 	end
-	if onGround then
+	-- 刚起跳、刚踩中弹起的一小段时间里，Roblox 还会把人当成站在地上（或别人头上）。这几帧也要按这一跳的重力算，
+	-- 不然上升重力不是 1 的跳法会少跳一截，而且少多少每次不一样
+	local v = root.AssemblyLinearVelocity
+	local launching = now - customJumpStart < 0.3 and v.Y > 0
+	if onGround and not launching then
 		return
 	end
 
 	-- Roblox 自带重力照常生效，这里只补上差值：重力倍数 k 小于 1 往上托，大于 1 往下压
-	local v = root.AssemblyLinearVelocity
 	local held = jumpHeld()
 	local t = now - customJumpStart
 	local holding = t >= style.HoldStart
@@ -936,7 +1019,7 @@ if touchButton then
 	touchButton.Size = UDim2.fromOffset(90, 90)
 end
 
--- 按住加高和马里奥式下接管空格和手柄 A 键：起跳、缓冲、自动连跳都由脚本处理
+-- 按住加高、3D马里奥式和马里奥式下接管空格和手柄 A 键：起跳、缓冲、自动连跳都由脚本处理
 ContextActionService:BindActionAtPriority("ProtoJump", function(_, inputState)
 	if mode ~= 5 or jumpStyle == "Cut" then
 		return Enum.ContextActionResult.Pass
@@ -974,7 +1057,55 @@ local function setMode(id)
 		humanoid.JumpPower = currentJumpPower()
 	end
 	ContextActionService:SetTitle("ProtoAction", if id == 5 then "跳" else "踢")
+	refreshTestInfo()
 end
+
+local function applyJumpStyle(style)
+	jumpStyle = style
+	jumpRising = false
+	jumpQueuedAt = nil
+	if humanoid then
+		humanoid.JumpPower = currentJumpPower()
+	end
+	refreshStyleToggle()
+	refreshTestInfo()
+end
+
+local function applyAssist(newMode)
+	assistMode = newMode
+	assistTarget = nil
+	assistHold = nil
+	refreshAssistToggle()
+	refreshTestInfo()
+end
+
+-- 主持人改了设置，所有人跟着变
+workspace:GetAttributeChangedSignal("TestMode"):Connect(function()
+	setMode(workspace:GetAttribute("TestMode"))
+end)
+workspace:GetAttributeChangedSignal("TestJumpStyle"):Connect(function()
+	applyJumpStyle(workspace:GetAttribute("TestJumpStyle"))
+end)
+workspace:GetAttributeChangedSignal("TestAssist"):Connect(function()
+	applyAssist(workspace:GetAttribute("TestAssist"))
+end)
+workspace:GetAttributeChangedSignal("NPCMode"):Connect(refreshTestInfo)
+workspace:GetAttributeChangedSignal("TestRound"):Connect(function()
+	refreshTestInfo()
+	showBanner("第 " .. tostring(workspace:GetAttribute("TestRound")) .. " 轮开始", Color3.fromRGB(255, 230, 120), 1.6)
+end)
+
+local function refreshHostControls()
+	local host = isHost()
+	modeBar.Visible = host
+	roundButton.Visible = host
+	refreshNPCToggle()
+	refreshStyleToggle()
+	refreshAssistToggle()
+end
+player:GetAttributeChangedSignal("TestHost"):Connect(refreshHostControls)
+refreshHostControls()
+refreshTestInfo()
 
 for _, m in Config.Modes do
 	local b = Instance.new("TextButton")
@@ -989,7 +1120,7 @@ for _, m in Config.Modes do
 	corner(b, 8)
 	modeButtons[m.id] = b
 	b.Activated:Connect(function()
-		setMode(m.id)
+		TestSettingRemote:FireServer("Mode", m.id)
 	end)
 end
 
@@ -1001,8 +1132,8 @@ local keyModes = {
 	[Enum.KeyCode.Five] = 5,
 }
 UserInputService.InputBegan:Connect(function(input, processed)
-	if not processed and keyModes[input.KeyCode] then
-		setMode(keyModes[input.KeyCode])
+	if not processed and keyModes[input.KeyCode] and isHost() then
+		TestSettingRemote:FireServer("Mode", keyModes[input.KeyCode])
 	end
 end)
 
@@ -1035,7 +1166,7 @@ local function onCharacterAdded(char)
 		end
 		if jumpStyle ~= "Cut" then
 			-- 不是脚本自己发起的起跳（比如手机自带跳跃键），检测不到按住：
-			-- 马里奥式按一直按住算（跳满高），按住加高按标准跳算
+			-- 马里奥式按一直按住算（跳满高），按住加高和3D马里奥式按标准跳算
 			if customOwnJump then
 				customOwnJump = false
 			else

@@ -11,6 +11,12 @@ local Config = require(ReplicatedStorage:WaitForChild("ProtoConfig"))
 
 Players.CharacterAutoLoads = false
 workspace:SetAttribute("NPCAttack", Config.NPCAttack)
+-- 多人测试的这一轮设置：主持人改，所有人跟着变（见下方 TestSetting）
+workspace:SetAttribute("NPCMode", if Config.NPCAttack then "attack" else "wander")
+workspace:SetAttribute("TestMode", Config.DefaultMode)
+workspace:SetAttribute("TestJumpStyle", Config.JumpStyle)
+workspace:SetAttribute("TestAssist", Config.AssistMode)
+workspace:SetAttribute("TestRound", 1)
 
 local remotes = Instance.new("Folder")
 remotes.Name = "ProtoRemotes"
@@ -25,8 +31,49 @@ local PoseRemote = newRemote("Pose") -- 客户端 -> 服务器：当前姿势，
 local FXRemote = newRemote("FX") -- 服务器 -> 所有人：命中特效
 local KickedRemote = newRemote("Kicked") -- 服务器 -> 被踢的人
 local ScoredRemote = newRemote("Scored") -- 服务器 -> 踢中的人
-local NPCToggleRemote = newRemote("NPCToggle") -- 客户端 -> 服务器：开关 NPC 进攻
+local TestSettingRemote = newRemote("TestSetting") -- 客户端 -> 服务器：主持人改这一轮的测试设置、开新一轮
 remotes.Parent = ReplicatedStorage
+
+-- 主持人：体验的所有者（群组体验是群主）和 Config.TestHostUserIds 里的人；在 Studio 里测时人人都是
+local function isHost(plr)
+	if RunService:IsStudio() or table.find(Config.TestHostUserIds, plr.UserId) then
+		return true
+	end
+	if game.CreatorType == Enum.CreatorType.User then
+		return plr.UserId == game.CreatorId
+	end
+	local ok, rank = pcall(function()
+		return plr:GetRankInGroup(game.CreatorId)
+	end)
+	return ok and rank == 255
+end
+
+local function statValue(plr, name)
+	local stats = plr:FindFirstChild("leaderstats")
+	return stats and stats:FindFirstChild(name)
+end
+
+local ASSIST_NAMES = { Early = "前段辅助", Late = "末段吸附", Off = "不辅助" }
+local NPC_MODE_NAMES = { attack = "NPC 进攻", wander = "NPC 闲逛", off = "NPC 不出现" }
+
+-- 这一轮的设置，写进日志用
+local function describeSettings()
+	local modeId = workspace:GetAttribute("TestMode")
+	local modeName = tostring(modeId)
+	for _, m in Config.Modes do
+		if m.id == modeId then
+			modeName = m.name
+		end
+	end
+	local parts = { modeName }
+	if modeId == 5 then
+		local style = workspace:GetAttribute("TestJumpStyle")
+		table.insert(parts, if style == "Cut" then "松手截断" else Config.JumpStyles[style].Name)
+		table.insert(parts, ASSIST_NAMES[workspace:GetAttribute("TestAssist")])
+	end
+	table.insert(parts, NPC_MODE_NAMES[workspace:GetAttribute("NPCMode")])
+	return table.concat(parts, "，")
+end
 
 PhysicsService:RegisterCollisionGroup("Characters")
 PhysicsService:RegisterCollisionGroup("Ragdolls")
@@ -215,6 +262,10 @@ local function knockOut(target, velocity, attackerName, kind)
 	local spot = dummySpots[target]
 	dummySpots[target] = nil
 	if victim then
+		local downs = statValue(victim, "被踩")
+		if downs then
+			downs.Value += 1
+		end
 		KickedRemote:FireClient(victim, torso, attackerName, kind)
 		target:Destroy()
 		respawnPlayer(victim, Config.RespawnDelay)
@@ -265,21 +316,23 @@ HitRemote.OnServerEvent:Connect(function(plr, target, kind, power, dir)
 
 	local speed = Config.KnockbackMin + (Config.KnockbackMax - Config.KnockbackMin) * power
 	local velocity = flat * speed + Vector3.new(0, Config.KnockbackUp + speed * 0.2, 0)
-	local victimIsPlayer = Players:GetPlayerFromCharacter(target) ~= nil
+	local victim = Players:GetPlayerFromCharacter(target)
+	local victimIsPlayer = victim ~= nil
+	local victimName = if victim then victim.DisplayName else target.Name
 	knockOut(target, velocity, plr.DisplayName, kind)
 
-	local stats = plr:FindFirstChild("leaderstats")
-	if stats then
-		local total = stats:FindFirstChild("踢飞")
-		local real = stats:FindFirstChild("踢真人")
-		if total then
-			total.Value += 1
-		end
-		if real and victimIsPlayer then
-			real.Value += 1
-		end
+	local total = statValue(plr, "踢飞")
+	local real = statValue(plr, "踢真人")
+	if total then
+		total.Value += 1
+	end
+	if real and victimIsPlayer then
+		real.Value += 1
 	end
 	ScoredRemote:FireClient(plr, kind, victimIsPlayer)
+	-- 测试日志：主持人在开发者控制台（F9）的服务器日志里能看到
+	print(string.format("[测试] 第 %d 轮 %s %s %s（%s）", workspace:GetAttribute("TestRound"), plr.DisplayName,
+		if kind == "stomp" then "踩中" else "踢中", victimName, describeSettings()))
 end)
 
 local validPoses = { [""] = true, charge = true, fly = true, kick = true }
@@ -290,8 +343,79 @@ PoseRemote.OnServerEvent:Connect(function(plr, pose)
 	end
 end)
 
-NPCToggleRemote.OnServerEvent:Connect(function()
-	workspace:SetAttribute("NPCAttack", not workspace:GetAttribute("NPCAttack"))
+-- 移动 NPC 三档：进攻、只闲逛、不出现（木头假人不受影响）
+local function countNPCs()
+	local n = 0
+	for _, npc in npcFolder:GetChildren() do
+		if npc.Name == "NPC" then
+			n += 1
+		end
+	end
+	return n
+end
+
+local function setNPCMode(npcMode)
+	workspace:SetAttribute("NPCMode", npcMode)
+	workspace:SetAttribute("NPCAttack", npcMode == "attack")
+	if npcMode == "off" then
+		for _, npc in npcFolder:GetChildren() do
+			if npc.Name == "NPC" then
+				npc:Destroy()
+			end
+		end
+	else
+		for _ = countNPCs() + 1, Config.NPCCount do
+			task.spawn(spawnNPC)
+		end
+	end
+end
+
+-- 新一轮：把上一轮每个人的计分写进日志、发给所有人看，然后清零
+local function startNewRound()
+	local round = workspace:GetAttribute("TestRound") or 1
+	local lines = {}
+	for _, p in Players:GetPlayers() do
+		local kills, real, downs = statValue(p, "踢飞"), statValue(p, "踢真人"), statValue(p, "被踩")
+		table.insert(lines, string.format("%s：击倒 %d（真人 %d），被击倒 %d", p.DisplayName,
+			kills and kills.Value or 0, real and real.Value or 0, downs and downs.Value or 0))
+		for _, v in { kills, real, downs } do
+			v.Value = 0
+		end
+	end
+	print(string.format("[测试] 第 %d 轮结束（%s）", round, describeSettings()))
+	for _, line in lines do
+		print("[测试]   " .. line)
+	end
+	workspace:SetAttribute("LastRoundSummary", string.format("第 %d 轮结果（%s）\n", round, describeSettings())
+		.. table.concat(lines, "\n"))
+	workspace:SetAttribute("TestRound", round + 1)
+end
+
+local MODE_IDS = {}
+for _, m in Config.Modes do
+	MODE_IDS[m.id] = true
+end
+
+TestSettingRemote.OnServerEvent:Connect(function(plr, key, value)
+	if not isHost(plr) then
+		return
+	end
+	if key == "Mode" and MODE_IDS[value] then
+		workspace:SetAttribute("TestMode", value)
+	elseif key == "JumpStyle" and (value == "Cut" or Config.JumpStyles[value]) then
+		workspace:SetAttribute("TestJumpStyle", value)
+	elseif key == "Assist" and ASSIST_NAMES[value] then
+		workspace:SetAttribute("TestAssist", value)
+	elseif key == "NPCMode" and NPC_MODE_NAMES[value] then
+		setNPCMode(value)
+	elseif key == "NewRound" then
+		startNewRound()
+		return
+	else
+		return
+	end
+	print(string.format("[测试] 第 %d 轮 %s 改了设置：%s", workspace:GetAttribute("TestRound"), plr.DisplayName,
+		describeSettings()))
 end)
 
 -- NPC：平时随机走动和跳；打开“NPC 进攻”后会挑人，蹲下蓄力，再跳过去踩头
@@ -519,6 +643,9 @@ spawnDummy = function(spot)
 end
 
 spawnNPC = function()
+	if workspace:GetAttribute("NPCMode") == "off" then
+		return
+	end
 	local npc, hum = newNPCModel(
 		"NPC",
 		Color3.fromRGB(255, 220, 170),
@@ -526,6 +653,11 @@ spawnNPC = function()
 		Color3.fromRGB(60, 60, 90)
 	)
 	if not npc then
+		return
+	end
+	-- 生成要等一会儿：等完再看一次，主持人可能刚关掉 NPC，或者补齐时已经够数
+	if workspace:GetAttribute("NPCMode") == "off" or countNPCs() >= Config.NPCCount then
+		npc:Destroy()
 		return
 	end
 	hum.WalkSpeed = Config.NPCWalkSpeed
@@ -597,7 +729,11 @@ local function onPlayerAdded(plr)
 	local real = Instance.new("IntValue")
 	real.Name = "踢真人"
 	real.Parent = stats
+	local downs = Instance.new("IntValue")
+	downs.Name = "被踩"
+	downs.Parent = stats
 	stats.Parent = plr
+	plr:SetAttribute("TestHost", isHost(plr))
 
 	plr.CharacterAdded:Connect(function(char)
 		onCharacterAdded(plr, char)

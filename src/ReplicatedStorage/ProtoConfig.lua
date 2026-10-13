@@ -1,7 +1,11 @@
 -- 基础行为原型的参数。只改数字就能调手感，改完重新开始试玩即可。
 local Config = {}
 
-Config.DefaultMode = 3
+Config.DefaultMode = 5
+
+-- 多人测试：主持人能统一切换所有人的模式、跳法、辅助和 NPC，还能开新一轮（清零计分）；其他人只能看到这一轮的设置。
+-- 体验的所有者自动是主持人（群组体验是群主），在 Studio 里测时人人都是。要让别人也当主持人，把他的 UserId 填进来
+Config.TestHostUserIds = {}
 
 -- 移动
 Config.WalkSpeed = 16
@@ -44,8 +48,8 @@ Config.KnockbackUp = 50
 Config.HitstopTime = 0.07 -- 命中瞬间的停顿
 Config.ShakeIntensity = 1.2 -- 震屏强度
 
--- 踩头（模式 5）的跳法。屏幕上的按钮可以在三种之间切换
-Config.JumpStyle = "Boost" -- "Boost" 按住加高，"Mario" 马里奥式，"Cut" 松手截断
+-- 踩头（模式 5）的跳法。主持人用屏幕上的按钮在几种之间切换
+Config.JumpStyle = "Boost" -- "Boost" 按住加高，"Mario3D" 3D马里奥式，"Mario" 马里奥式，"Cut" 松手截断
 
 -- 松手截断：按住正常跳，上升途中松手就把上升速度砍掉
 Config.StompJumpPower = 62 -- 一直按住时的起跳速度，约 10 格高；普通跳是 50，约 6 格
@@ -64,6 +68,20 @@ Config.JumpStyles = {
 		Fall = 1.4, -- 下落的重力倍数，比 Roblox 默认稍快
 		ApexHang = false, -- 最高点附近还按着时，会不会在顶上飘一下
 		AutoRepeat = true, -- 按住不放，落地自动再跳（只跳标准高度，想跳高要重新按）
+	},
+	-- 3D马里奥式：和按住加高的跳高、按法、空中操控都一样，只是上升和下落用同样轻的重力（参考 64 和奥德赛的普通跳），
+	-- 整跳慢约三分之一，多出的时间平均分在上升和下落里
+	Mario3D = {
+		Name = "3D马里奥式",
+		Power = 40, -- 重力变轻后，点一下仍和按住加高一样高
+		HoldStart = 0.08,
+		HoldEnd = 0.3,
+		RiseHeld = 0.19, -- 按住也和按住加高一样高
+		RiseReleased = 0.63,
+		Fall = 0.63, -- 和上升一样，下落不加速
+		ApexHang = false,
+		AutoRepeat = true,
+		Bounce = 43, -- 踩中后弹起的速度，配合这套重力弹的高度和按住加高一样；不写就用 Config.StompBounce
 	},
 	Mario = {
 		Name = "马里奥式",
@@ -116,11 +134,11 @@ Config.MagnetOnlyInChain = false -- true 时只在连踩过程中吸附
 Config.ChainHitstopBonus = 0.015 -- 每多连一次，命中停顿多几秒（最多加 3 次）
 Config.ChainShakeBonus = 0.25 -- 每多连一次，震屏强多少倍
 Config.ChainPitchStep = 0.12 -- 每多连一次，提示音升高多少
-Config.StompBounce = 55 -- 踩中后自己弹起的速度，固定高度，不受按键影响；可以连踩
+Config.StompBounce = 55 -- 踩中后自己弹起的速度，固定高度，不受按键影响；可以连踩。跳法里写了 Bounce 的用跳法自己的
 Config.StompPower = 0.5 -- 被踩的人飞多远（0 到 1）
 
--- NPC 踩头 AI（屏幕上的按钮可以随时开关）
-Config.NPCAttack = true -- 开局时 NPC 会不会主动踩人
+-- NPC 踩头 AI（主持人用屏幕上的按钮随时切换：进攻、只闲逛、不出现）
+Config.NPCAttack = true -- 开局时 NPC 会不会主动踩人；false 就只闲逛
 Config.NPCSightRange = 50 -- 多远内的人会被 NPC 盯上
 Config.NPCTargetPlayerChance = 0.5 -- 挑目标时选中玩家的概率，其余时候踩别的 NPC
 Config.NPCApproachTime = 4 -- 最多追几秒，追不上就放弃
