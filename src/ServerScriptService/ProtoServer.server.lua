@@ -201,7 +201,8 @@ local function respawnPlayer(plr, delay)
 	end)
 end
 
-local spawnNPC
+local spawnNPC, spawnDummy
+local dummySpots = {} -- 木头假人 -> 它站的位置
 
 local function knockOut(target, velocity, attackerName, kind)
 	target:SetAttribute("Down", true)
@@ -211,10 +212,15 @@ local function knockOut(target, velocity, attackerName, kind)
 	FXRemote:FireAllClients(pos, kind, velocity.Magnitude)
 
 	local victim = Players:GetPlayerFromCharacter(target)
+	local spot = dummySpots[target]
+	dummySpots[target] = nil
 	if victim then
 		KickedRemote:FireClient(victim, torso, attackerName, kind)
 		target:Destroy()
 		respawnPlayer(victim, Config.RespawnDelay)
+	elseif spot then
+		target:Destroy()
+		task.delay(Config.DummyRespawnDelay, spawnDummy, spot)
 	else
 		target:Destroy()
 		task.delay(Config.NPCRespawnDelay, spawnNPC)
@@ -312,12 +318,12 @@ local function headTop(model)
 	return getRoot(model).Position.Y + 3
 end
 
--- 挑目标：视野内最近的三个人里随机挑一个，玩家按概率挑
+-- 挑目标：视野内最近的三个人里随机挑一个，玩家按概率挑；木头假人留给玩家，不挑
 local function pickTarget(npc)
 	local root = getRoot(npc)
 	local candidates = {}
 	for _, m in CollectionService:GetTagged("KickTarget") do
-		if m ~= npc and isKickable(m) then
+		if m ~= npc and isKickable(m) and not dummySpots[m] then
 			local dist = flatDistance(getRoot(m).Position, root.Position)
 			local isPlayer = Players:GetPlayerFromCharacter(m) ~= nil
 			if dist <= Config.NPCSightRange and (not isPlayer or math.random() < Config.NPCTargetPlayerChance) then
@@ -460,24 +466,24 @@ end
 
 local WALK_ANIM = "rbxassetid://507777826"
 
-spawnNPC = function()
+-- 生成一个 R15 小人：头、身体和手臂、腿各一种颜色；去掉自带脚本，标成可以被踢、被踩的目标
+local function newNPCModel(name, headColor, bodyColor, legColor)
 	local desc = Instance.new("HumanoidDescription")
-	local shirt = Color3.fromHSV(math.random(), 0.65, 1)
-	desc.HeadColor = Color3.fromRGB(255, 220, 170)
-	desc.TorsoColor = shirt
-	desc.LeftArmColor = shirt
-	desc.RightArmColor = shirt
-	desc.LeftLegColor = Color3.fromRGB(60, 60, 90)
-	desc.RightLegColor = Color3.fromRGB(60, 60, 90)
+	desc.HeadColor = headColor
+	desc.TorsoColor = bodyColor
+	desc.LeftArmColor = bodyColor
+	desc.RightArmColor = bodyColor
+	desc.LeftLegColor = legColor
+	desc.RightLegColor = legColor
 
 	local ok, npc = pcall(function()
 		return Players:CreateHumanoidModelFromDescription(desc, Enum.HumanoidRigType.R15)
 	end)
 	if not ok or not npc then
 		warn("NPC 生成失败：", npc)
-		return
+		return nil
 	end
-	npc.Name = "NPC"
+	npc.Name = name
 	for _, d in npc:GetDescendants() do
 		if d:IsA("BaseScript") then
 			d:Destroy()
@@ -485,11 +491,45 @@ spawnNPC = function()
 	end
 
 	local hum = npc:FindFirstChildOfClass("Humanoid")
-	hum.WalkSpeed = Config.NPCWalkSpeed
 	hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-	npc:PivotTo(CFrame.new(groundPoint() + Vector3.new(0, 4, 0)))
 	setCollisionGroup(npc, "Characters")
 	CollectionService:AddTag(npc, "KickTarget")
+	return npc, hum
+end
+
+-- 木头假人：站在场地标好的位置（Arena 里的 DummySpot）不动、不还手，给玩家练手；被踩后在原位复活
+local DUMMY_WOOD = Color3.fromRGB(205, 160, 110)
+local DUMMY_LEGS = Color3.fromRGB(150, 110, 70)
+
+spawnDummy = function(spot)
+	if not spot.Parent then
+		return
+	end
+	local npc, hum = newNPCModel("Dummy", DUMMY_WOOD, DUMMY_WOOD, DUMMY_LEGS)
+	if not npc then
+		return
+	end
+	local root = getRoot(npc)
+	local groundY = spot.Position.Y - spot.Size.X / 2 -- 圆盘平放在地上，厚度是 Size.X
+	local standY = groundY + hum.HipHeight + root.Size.Y / 2
+	npc:PivotTo(CFrame.new(spot.Position.X, standY, spot.Position.Z) * CFrame.Angles(0, math.random() * 2 * math.pi, 0))
+	root.Anchored = true -- 钉在原地，被人撞也不动
+	dummySpots[npc] = spot
+	npc.Parent = npcFolder
+end
+
+spawnNPC = function()
+	local npc, hum = newNPCModel(
+		"NPC",
+		Color3.fromRGB(255, 220, 170),
+		Color3.fromHSV(math.random(), 0.65, 1),
+		Color3.fromRGB(60, 60, 90)
+	)
+	if not npc then
+		return
+	end
+	hum.WalkSpeed = Config.NPCWalkSpeed
+	npc:PivotTo(CFrame.new(groundPoint() + Vector3.new(0, 4, 0)))
 	npc.Parent = npcFolder
 	pcall(function()
 		getRoot(npc):SetNetworkOwner(nil)
@@ -576,4 +616,8 @@ end)
 
 for _ = 1, Config.NPCCount do
 	task.spawn(spawnNPC)
+end
+for _, spot in CollectionService:GetTagged("DummySpot") do
+	spot.Transparency = 1
+	task.spawn(spawnDummy, spot)
 end

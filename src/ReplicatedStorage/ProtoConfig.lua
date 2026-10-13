@@ -134,8 +134,10 @@ Config.BouncePadSpeed = 140
 Config.NPCCount = 8
 Config.NPCWalkSpeed = 12
 Config.NPCJumpChance = 0.35
-Config.NPCWanderRadius = 110
+Config.NPCWanderRadius = 50 -- NPC 在离中央多远内走动和出生；场地半宽 60，要比它小
 Config.NPCRespawnDelay = 2
+-- 木头假人：不动、不还手，位置和数量看场地里的 DummySpot（tools/BuildArena.lua）
+Config.DummyRespawnDelay = 2 -- 被踩后几秒在原位复活
 Config.RespawnDelay = 1.5 -- 被踢飞后几秒复活
 Config.RagdollLifetime = 4
 
