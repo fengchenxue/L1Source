@@ -11,12 +11,11 @@ local Config = require(ReplicatedStorage:WaitForChild("ProtoConfig"))
 
 Players.CharacterAutoLoads = false
 workspace:SetAttribute("NPCAttack", Config.NPCAttack)
--- 多人测试的这一轮设置：主持人改，所有人跟着变（见下方 TestSetting）
+-- 多人测试的当前版本：主持人改，所有人跟着变（见下方 TestSetting）
 workspace:SetAttribute("NPCMode", if Config.NPCAttack then "attack" else "wander")
 workspace:SetAttribute("TestMode", Config.DefaultMode)
 workspace:SetAttribute("TestJumpStyle", Config.JumpStyle)
 workspace:SetAttribute("TestAssist", Config.AssistMode)
-workspace:SetAttribute("TestRound", 1)
 
 local remotes = Instance.new("Folder")
 remotes.Name = "ProtoRemotes"
@@ -31,7 +30,7 @@ local PoseRemote = newRemote("Pose") -- 客户端 -> 服务器：当前姿势，
 local FXRemote = newRemote("FX") -- 服务器 -> 所有人：命中特效
 local KickedRemote = newRemote("Kicked") -- 服务器 -> 被踢的人
 local ScoredRemote = newRemote("Scored") -- 服务器 -> 踢中的人
-local TestSettingRemote = newRemote("TestSetting") -- 客户端 -> 服务器：主持人改这一轮的测试设置、开新一轮
+local TestSettingRemote = newRemote("TestSetting") -- 客户端 -> 服务器：主持人改测试设置
 remotes.Parent = ReplicatedStorage
 
 -- 主持人：体验的所有者（群组体验是群主）和 Config.TestHostUserIds 里的人；在 Studio 里测时人人都是
@@ -56,7 +55,7 @@ end
 local ASSIST_NAMES = { Early = "前段辅助", Late = "末段吸附", Off = "不辅助" }
 local NPC_MODE_NAMES = { attack = "NPC 进攻", wander = "NPC 闲逛", off = "NPC 不出现" }
 
--- 这一轮的设置，写进日志用
+-- 当前版本的设置，写进日志用
 local function describeSettings()
 	local modeId = workspace:GetAttribute("TestMode")
 	local modeName = tostring(modeId)
@@ -331,8 +330,8 @@ HitRemote.OnServerEvent:Connect(function(plr, target, kind, power, dir)
 	end
 	ScoredRemote:FireClient(plr, kind, victimIsPlayer)
 	-- 测试日志：主持人在开发者控制台（F9）的服务器日志里能看到
-	print(string.format("[测试] 第 %d 轮 %s %s %s（%s）", workspace:GetAttribute("TestRound"), plr.DisplayName,
-		if kind == "stomp" then "踩中" else "踢中", victimName, describeSettings()))
+	print(string.format("[测试] %s %s %s（%s）", plr.DisplayName, if kind == "stomp" then "踩中" else "踢中", victimName,
+		describeSettings()))
 end)
 
 local validPoses = { [""] = true, charge = true, fly = true, kick = true }
@@ -370,25 +369,33 @@ local function setNPCMode(npcMode)
 	end
 end
 
--- 新一轮：把上一轮每个人的计分写进日志、发给所有人看，然后清零
-local function startNewRound()
-	local round = workspace:GetAttribute("TestRound") or 1
-	local lines = {}
+-- 主持人换版本（模式、跳法、辅助）时结算上一个版本：每个人的计分写进日志、发给所有人看，然后清零。
+-- 这个版本里没人击倒过、也没人被击倒过（比如主持人连点按钮跳过中间的跳法），就不显示
+local resultSeq = 0
+local function settleVersion()
+	local lines, anyScore = {}, false
 	for _, p in Players:GetPlayers() do
 		local kills, real, downs = statValue(p, "踢飞"), statValue(p, "踢真人"), statValue(p, "被踩")
-		table.insert(lines, string.format("%s：击倒 %d（真人 %d），被击倒 %d", p.DisplayName,
-			kills and kills.Value or 0, real and real.Value or 0, downs and downs.Value or 0))
+		local k, r, d = kills and kills.Value or 0, real and real.Value or 0, downs and downs.Value or 0
+		if k + d > 0 then
+			anyScore = true
+		end
+		table.insert(lines, string.format("%s：击倒 %d（真人 %d），被击倒 %d", p.DisplayName, k, r, d))
 		for _, v in { kills, real, downs } do
 			v.Value = 0
 		end
 	end
-	print(string.format("[测试] 第 %d 轮结束（%s）", round, describeSettings()))
+	if not anyScore then
+		return
+	end
+	local title = "上一个版本（" .. describeSettings() .. "）"
+	print("[测试] " .. title .. "结束")
 	for _, line in lines do
 		print("[测试]   " .. line)
 	end
-	workspace:SetAttribute("LastRoundSummary", string.format("第 %d 轮结果（%s）\n", round, describeSettings())
-		.. table.concat(lines, "\n"))
-	workspace:SetAttribute("TestRound", round + 1)
+	resultSeq += 1
+	workspace:SetAttribute("LastResult", title .. "\n" .. table.concat(lines, "\n"))
+	workspace:SetAttribute("LastResultSeq", resultSeq)
 end
 
 local MODE_IDS = {}
@@ -396,26 +403,30 @@ for _, m in Config.Modes do
 	MODE_IDS[m.id] = true
 end
 
+-- 换版本的设置：改之前先结算上一个版本
+local VERSION_KEYS = {
+	Mode = { attribute = "TestMode", valid = function(v) return MODE_IDS[v] ~= nil end },
+	JumpStyle = { attribute = "TestJumpStyle", valid = function(v) return v == "Cut" or Config.JumpStyles[v] ~= nil end },
+	Assist = { attribute = "TestAssist", valid = function(v) return ASSIST_NAMES[v] ~= nil end },
+}
+
 TestSettingRemote.OnServerEvent:Connect(function(plr, key, value)
 	if not isHost(plr) then
 		return
 	end
-	if key == "Mode" and MODE_IDS[value] then
-		workspace:SetAttribute("TestMode", value)
-	elseif key == "JumpStyle" and (value == "Cut" or Config.JumpStyles[value]) then
-		workspace:SetAttribute("TestJumpStyle", value)
-	elseif key == "Assist" and ASSIST_NAMES[value] then
-		workspace:SetAttribute("TestAssist", value)
+	local versionKey = VERSION_KEYS[key]
+	if versionKey and versionKey.valid(value) then
+		if workspace:GetAttribute(versionKey.attribute) == value then
+			return
+		end
+		settleVersion()
+		workspace:SetAttribute(versionKey.attribute, value)
 	elseif key == "NPCMode" and NPC_MODE_NAMES[value] then
 		setNPCMode(value)
-	elseif key == "NewRound" then
-		startNewRound()
-		return
 	else
 		return
 	end
-	print(string.format("[测试] 第 %d 轮 %s 改了设置：%s", workspace:GetAttribute("TestRound"), plr.DisplayName,
-		describeSettings()))
+	print(string.format("[测试] %s 切换到：%s", plr.DisplayName, describeSettings()))
 end)
 
 -- NPC：平时随机走动和跳；打开“NPC 进攻”后会挑人，蹲下蓄力，再跳过去踩头

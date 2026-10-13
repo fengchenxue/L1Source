@@ -21,7 +21,7 @@ local TestSettingRemote = remotes:WaitForChild("TestSetting")
 local player = Players.LocalPlayer
 local camera = workspace.CurrentCamera
 
--- 模式、跳法、辅助都跟着服务器上这一轮的设置走（多人测试时主持人统一切换）
+-- 模式、跳法、辅助都跟着服务器上的当前版本走（多人测试时主持人统一切换）
 local mode = workspace:GetAttribute("TestMode") or Config.DefaultMode
 local state = "idle" -- idle / charging / flying / kicking / hitstop / down
 local character, humanoid, root, alignOri
@@ -137,7 +137,7 @@ scoreLabel.TextScaled = true
 scoreLabel.Text = "踢飞 0"
 scoreLabel.Parent = gui
 
--- 多人测试的主持人才能改设置（服务器判定后写在自己身上）；其他人的按钮都藏起来，只看这一轮的设置
+-- 多人测试的主持人才能改设置（服务器判定后写在自己身上）；其他人的按钮都藏起来，只看当前版本
 local function isHost()
 	return player:GetAttribute("TestHost") == true
 end
@@ -218,7 +218,7 @@ local function refreshAssistToggle()
 	assistToggle.Visible = mode == 5 and isHost()
 end
 
--- 这一轮的设置，所有人都能看到
+-- 当前版本的设置，所有人都能看到
 local testInfo = Instance.new("TextLabel")
 testInfo.Size = UDim2.new(0, 520, 0, 20)
 testInfo.Position = UDim2.new(0.5, -260, 0, 74)
@@ -230,7 +230,7 @@ testInfo.TextScaled = true
 testInfo.Parent = gui
 corner(testInfo, 6)
 local function refreshTestInfo()
-	local parts = { "第 " .. tostring(workspace:GetAttribute("TestRound") or 1) .. " 轮", Config.Modes[mode].name }
+	local parts = { "当前版本", Config.Modes[mode].name }
 	if mode == 5 then
 		table.insert(parts, styleName(jumpStyle))
 		table.insert(parts, ASSIST_NAMES[assistMode])
@@ -239,22 +239,7 @@ local function refreshTestInfo()
 	testInfo.Text = table.concat(parts, "｜")
 end
 
-local roundButton = Instance.new("TextButton")
-roundButton.Name = "NewRoundButton"
-roundButton.Size = UDim2.new(0, 150, 0, 32)
-roundButton.Position = UDim2.new(1, -170, 0, 240)
-roundButton.Font = Enum.Font.GothamBold
-roundButton.TextScaled = true
-roundButton.TextColor3 = Color3.new(1, 1, 1)
-roundButton.BackgroundColor3 = Color3.fromRGB(150, 80, 200)
-roundButton.Text = "新一轮（计分清零）"
-roundButton.Parent = gui
-corner(roundButton, 8)
-roundButton.Activated:Connect(function()
-	TestSettingRemote:FireServer("NewRound")
-end)
-
--- 上一轮结果：开新一轮时给所有人看一会儿
+-- 上一个版本的结果：主持人换版本时给所有人看一会儿
 local summaryLabel = Instance.new("TextLabel")
 summaryLabel.Size = UDim2.new(0, 360, 0, 200)
 summaryLabel.Position = UDim2.new(0, 16, 0.5, -100)
@@ -277,10 +262,10 @@ summaryPadding.PaddingTop = UDim.new(0, 8)
 summaryPadding.PaddingBottom = UDim.new(0, 8)
 summaryPadding.Parent = summaryLabel
 local summaryToken = 0
-workspace:GetAttributeChangedSignal("LastRoundSummary"):Connect(function()
+workspace:GetAttributeChangedSignal("LastResultSeq"):Connect(function()
 	summaryToken += 1
 	local token = summaryToken
-	summaryLabel.Text = workspace:GetAttribute("LastRoundSummary") or ""
+	summaryLabel.Text = workspace:GetAttribute("LastResult") or ""
 	summaryLabel.Visible = true
 	task.delay(12, function()
 		if token == summaryToken then
@@ -1079,26 +1064,25 @@ local function applyAssist(newMode)
 	refreshTestInfo()
 end
 
--- 主持人改了设置，所有人跟着变
+-- 主持人换了版本，所有人跟着变，并在屏幕中间提示一下
+local VERSION_COLOR = Color3.fromRGB(255, 230, 120)
 workspace:GetAttributeChangedSignal("TestMode"):Connect(function()
 	setMode(workspace:GetAttribute("TestMode"))
+	showBanner("换成：" .. Config.Modes[mode].name, VERSION_COLOR, 1.6)
 end)
 workspace:GetAttributeChangedSignal("TestJumpStyle"):Connect(function()
 	applyJumpStyle(workspace:GetAttribute("TestJumpStyle"))
+	showBanner("换成：" .. styleName(jumpStyle), VERSION_COLOR, 1.6)
 end)
 workspace:GetAttributeChangedSignal("TestAssist"):Connect(function()
 	applyAssist(workspace:GetAttribute("TestAssist"))
+	showBanner("换成：" .. ASSIST_NAMES[assistMode], VERSION_COLOR, 1.6)
 end)
 workspace:GetAttributeChangedSignal("NPCMode"):Connect(refreshTestInfo)
-workspace:GetAttributeChangedSignal("TestRound"):Connect(function()
-	refreshTestInfo()
-	showBanner("第 " .. tostring(workspace:GetAttribute("TestRound")) .. " 轮开始", Color3.fromRGB(255, 230, 120), 1.6)
-end)
 
 local function refreshHostControls()
 	local host = isHost()
 	modeBar.Visible = host
-	roundButton.Visible = host
 	refreshNPCToggle()
 	refreshStyleToggle()
 	refreshAssistToggle()
